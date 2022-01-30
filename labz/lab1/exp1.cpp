@@ -1,5 +1,6 @@
 /*
 	lab1, exp1
+    alternates LEDs  on/off
     #include <Arduino.h> // already done
     https://www.tinkercad.com/things/du3xcP9zcy1-exp1
 */
