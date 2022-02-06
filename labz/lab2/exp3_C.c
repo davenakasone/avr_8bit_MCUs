@@ -1,5 +1,5 @@
 #include <avr/io.h>
-
+#include <util/delay.h>
 int main (void)
 {
 	DDRB = 0xFF; //set PORTB as an output for LED
@@ -9,7 +9,6 @@ int main (void)
 	
 	while (1)
 	{
-		for(int i=0; i<=1000;i++){
 		//check if pushbutton connected to PINC.0 is pressed
 		if ((PINC & 0x01) == 0x01)
 		{
@@ -20,9 +19,7 @@ int main (void)
 		{	PORTB = MODE_ << 1;
 			//seq <<1 ; //if the button is not pressed, turn OFF LEDs
 		}
-		}
+        _delay_ms(1000); // wait 1 second
 	}
-	
-
 	return 0;
 }
