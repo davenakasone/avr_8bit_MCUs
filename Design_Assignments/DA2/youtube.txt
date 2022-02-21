@@ -1,0 +1,11 @@
+task1, 250 ms delay:
+    https://youtu.be/0c75GUvmLo0
+    
+task2, LED activated by polling:
+    https://youtu.be/q-BGHsYzP0Q
+
+task3, LED activated by interrupt:
+    https://youtu.be/cC0MpXEx9PQ
+
+task4, logic analyzer and timing:
+    https://youtu.be/vdnolojUFSs
