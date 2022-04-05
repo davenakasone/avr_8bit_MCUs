@@ -1,5 +1,5 @@
 /*
-	cpe301, midterm2, all task are contained
+	cpe301, midterm2, all tasks are contained
 	
 	servo
 		Vcc -> external source
