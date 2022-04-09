@@ -1,5 +1,5 @@
 /*
-	cpe301, da5, task3
+	cpe301, da5, task1
 	task1: speed of a DC motor is controlled by a potentiometer on PC0
 	task2: speed of a stepper motor is controlled by a potentiometer on PC0
 	task3: position of a servo is controlled by a potentiometer on PC0
@@ -7,7 +7,9 @@
 	ADC0       --> PC0    // the potentiometer + gnd + AREF(5V)
 	RX         --> PD0    // UART for viewing
 	TX         --> PD1    // UART for viewing
-	PWM_servo  --> PD2    // using OC3B
+	PWM_dc     --> PB2    // using OC1B
+	in1_dc     --> PB1    // motor direction control
+	in2_dc     --> PB0    // motor direction control
 
 	preparations >>>
 		[hammer] -> toolchain -> AVR/GNU Linker -> General -> check "Use vprintf library(-Wl, -u, vprintf)
@@ -15,27 +17,37 @@
 		tools -> Data Visualizer -> Configuration -> External Connection -> Serial Port -> 
 			set the terminal's BAUD to 9600, open a terminal, add /r/n, COM3 "mEDBG"
 			
-	external power (5V) used, shared ground
-	servo, HS 5065MG, f = 200Hz, min: 750us, max: 2250us
-	using timer3, prescaled x8, fast PWM mode 14
+	external power used (6V), shared ground
+	DC motor has max of 6V
+	keep duty cycle 5% : 95% , T = 20ms : 30ms
+	no direction change required
+	
+	 in1  |  in2  |  action
+	______________________
+	  0   |   0   |  stop
+	  0   |   1   |  CW
+	  1   |   0   |  CCW
+	  1   |   1   | illegal
+
+	T = 25ms, f_pwm = 1/T = 40 Hz, N = 64
+	f_pwm = f_cpu / (N * [1 + ICR1]),, --> ICR1 as top @ 6249
 */
 
 #define F_CPU 16000000UL
 #define BAUD 9600
 #define BAUD_PRESCALE ((F_CPU / (BAUD * 16UL)) - 1)
 #define HELP_BUF 128
+#define DEBUG_UART 123
 
-#define ADC_MAX 1023
-#define SERVO_WIDTH 10000    // f_pwm  = 200 Hz,  200 = f_cpu / (N * (TOP+1)  -> TOP = 9999
-#define SERVO_START 1400     // 750us min,  f = f_cpu / N = 2e6, T = 1/f = 0.5us  ->  750/0.5 = 1500...don't max out
-#define SERVO_STOP 4600      // 2250us max, "                                     "  2250/0.5 = 4500...don't max out
-#define SERVO_HANG 100       // ms, change based on step size, the wait time
-#define SERVO_RETURN 500     // time for reset
-#define SERVO_RANGE (SERVO_STOP - SERVO_START)
+#define ADC_MAX 1023     // highest raw ADC value, the minimum is 0
+#define DC_WIDTH 6249    // sets ICR1 to get required frequency
+#define DC_MIN 0         // for motor enable, 0% duty cycle
+#define DC_MAX 6138      // for motor enable, 98% duty cycle ... maps 6x
 
-
-#define PIN_SERVO 2    // servo uses PD2 for PWM
-#define PIN_POT 0      // potentiometer on PC0
+#define DC_PWM 2     // motor enable using PWM, PB2
+#define DC_IN_1 1    // controls motor direction, PB1
+#define DC_IN_2 0    // controls motor direction, PB0
+#define PIN_POT 0    // potentiometer on PC0
 
 #include <avr/interrupt.h>
 #include <avr/io.h>
@@ -45,9 +57,9 @@
 #include <util/atomic.h>
 #include <util/delay.h>
 
-volatile unsigned char helper [HELP_BUF];
-uint16_t adc_raw;
-uint16_t servo_counter;
+unsigned char helper[HELP_BUF];    // UART debugging
+uint16_t adc_raw;                  // gets raw ADC value
+uint16_t motor_duty;               // sets duty cycle using OCR1B of motor PWM enable
 
 void read_adc (void);
 void usart_putc (char send_char);
@@ -58,8 +70,7 @@ int main(void)
 {
 	memset(helper, '\0', HELP_BUF);
 	adc_raw = 0;
-	servo_counter = SERVO_START;
-	
+	motor_duty = DC_MIN;
 	
 	PORTC |= (1 << PIN_POT);                         // activate pull-up resistor for potentiometer reading
 	ADCSRA |= ((1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0));    // 16Mhz/128 = 125Khz the ADC reference clock
@@ -72,11 +83,11 @@ int main(void)
 	UBRR0H = (BAUD_PRESCALE >> 8);               // sets baud rate, UBRR0 = { f_cpu / (16*BAUD) } - 1, has 4 msb
 	UBRR0L = BAUD_PRESCALE;
 	
-	DDRD |= (1 << PIN_SERVO);                               // dedicated PWM pin for timer 3 as output
-	PORTD |= (1 << PIN_SERVO);                              // this must be done to disable OC4B, the pin is shared
-	ICR3 = SERVO_WIDTH;                                     // the "TOP", makes the time period, OCR3A makes duty cycle
-	TCCR3A |= (1 << COM3B1) | (1 << WGM31);                 // non inverting, mode14
-	TCCR3B |= (1 << WGM33) | (1 << WGM32) | (1 << CS31);    // mode 14, prescale 8
+	DDRB = (1 << DC_PWM) | (1 << DC_IN_1) | (1 << DC_IN_2);              // outputs to motor driver
+	PORTB |= (1 << DC_IN_1);                                             // direction is set
+	ICR1 = DC_WIDTH;                                                     // frequency of motor PWM enable is set
+	TCCR1A = (1 << COM1B1) | (1 << WGM11);                               // timer1, fast PWM, mode 14, non-inverting, OC1B duty cycle
+	TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11) | (1 << CS10);    // prescale 64
 	
 	usart_puts("\r\n");
 	usart_puts("         initialization complete, program begins...\r\n");
@@ -86,20 +97,18 @@ int main(void)
 	while(1)
 	{
 		read_adc();
-		servo_counter = (SERVO_RANGE / ADC_MAX) * adc_raw + SERVO_START;
-		if (servo_counter > SERVO_STOP ||
-			servo_counter < SERVO_START )
+		motor_duty = 6 * adc_raw;
+		if (motor_duty > DC_MAX || motor_duty < DC_MIN)
 		{
-			servo_counter = SERVO_START;
-			_delay_ms(SERVO_RETURN);
+			motor_duty = DC_MIN;
 		}
+		OCR1B = motor_duty;
 		
-		OCR3B = servo_counter;
-		
-		sprintf(helper, "adc=  %9d  ,  servo:  %9d\r\n", 
-			adc_raw, servo_counter);
-		usart_puts(helper);
-		_delay_ms(SERVO_HANG);
+		#ifdef DEBUG_UART
+			sprintf(helper, "adc_raw=  %9d  ,  motor_duty=  %9d\r\n", 
+				adc_raw, motor_duty);
+			usart_puts(helper);
+		#endif
 	}
 	return EXIT_FAILURE;
 }

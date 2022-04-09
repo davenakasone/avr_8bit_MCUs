@@ -1,5 +1,5 @@
 /*
-	cpe301, da5, task3
+	cpe301, da5, task2
 	task1: speed of a DC motor is controlled by a potentiometer on PC0
 	task2: speed of a stepper motor is controlled by a potentiometer on PC0
 	task3: position of a servo is controlled by a potentiometer on PC0
@@ -7,7 +7,10 @@
 	ADC0       --> PC0    // the potentiometer + gnd + AREF(5V)
 	RX         --> PD0    // UART for viewing
 	TX         --> PD1    // UART for viewing
-	PWM_servo  --> PD2    // using OC3B
+	in1a       --> PB0    // stepper coil
+	in1b       --> PB1    // stepper coil
+	in2a       --> PB2    // stepper coil
+	in2b       --> PB3    // stepper coil
 
 	preparations >>>
 		[hammer] -> toolchain -> AVR/GNU Linker -> General -> check "Use vprintf library(-Wl, -u, vprintf)
@@ -15,27 +18,33 @@
 		tools -> Data Visualizer -> Configuration -> External Connection -> Serial Port -> 
 			set the terminal's BAUD to 9600, open a terminal, add /r/n, COM3 "mEDBG"
 			
-	external power (5V) used, shared ground
-	servo, HS 5065MG, f = 200Hz, min: 750us, max: 2250us
-	using timer3, prescaled x8, fast PWM mode 14
+	control the steps, 10ms to ?
+	
+	1a | 1b | 2a | 2b
+	_________________
+	1  | 0  | 0  | 0
+	0  | 1  | 0  | 0
+	0  | 0  | 1  | 0
+	0  | 0  | 0  | 1
+	...
 */
-
+//#define TEST 3000
 #define F_CPU 16000000UL
 #define BAUD 9600
 #define BAUD_PRESCALE ((F_CPU / (BAUD * 16UL)) - 1)
 #define HELP_BUF 128
+#define DEBUG_UART 123
 
-#define ADC_MAX 1023
-#define SERVO_WIDTH 10000    // f_pwm  = 200 Hz,  200 = f_cpu / (N * (TOP+1)  -> TOP = 9999
-#define SERVO_START 1400     // 750us min,  f = f_cpu / N = 2e6, T = 1/f = 0.5us  ->  750/0.5 = 1500...don't max out
-#define SERVO_STOP 4600      // 2250us max, "                                     "  2250/0.5 = 4500...don't max out
-#define SERVO_HANG 100       // ms, change based on step size, the wait time
-#define SERVO_RETURN 500     // time for reset
-#define SERVO_RANGE (SERVO_STOP - SERVO_START)
+#define ADC_MAX 1023          // highest raw ADC value, the minimum is 0
+#define STEP_FASTEST 1500     // fastest by smallest pause between steps
+#define STEP_SLOWEST 10000    // slowest by longest pause between steps
+#define STEP_1 0x8
+#define STEP_2 0x4
+#define STEP_3 0x2
+#define STEP_4 0x1
 
-
-#define PIN_SERVO 2    // servo uses PD2 for PWM
-#define PIN_POT 0      // potentiometer on PC0
+#define PINS_STEP 0xF   // the stepper coil pins on PB[0:3]
+#define PIN_POT 0       // potentiometer on PC0
 
 #include <avr/interrupt.h>
 #include <avr/io.h>
@@ -45,10 +54,11 @@
 #include <util/atomic.h>
 #include <util/delay.h>
 
-volatile unsigned char helper [HELP_BUF];
-uint16_t adc_raw;
-uint16_t servo_counter;
+unsigned char helper[HELP_BUF];    // UART debugging
+uint16_t adc_raw;                  // gets raw ADC value
+uint16_t stepper_pause_us;         // amount of time to pause between step
 
+void make_delay_us();
 void read_adc (void);
 void usart_putc (char send_char);
 void usart_puts (const char* send_str);
@@ -58,8 +68,7 @@ int main(void)
 {
 	memset(helper, '\0', HELP_BUF);
 	adc_raw = 0;
-	servo_counter = SERVO_START;
-	
+	stepper_pause_us = STEP_SLOWEST;
 	
 	PORTC |= (1 << PIN_POT);                         // activate pull-up resistor for potentiometer reading
 	ADCSRA |= ((1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0));    // 16Mhz/128 = 125Khz the ADC reference clock
@@ -72,11 +81,8 @@ int main(void)
 	UBRR0H = (BAUD_PRESCALE >> 8);               // sets baud rate, UBRR0 = { f_cpu / (16*BAUD) } - 1, has 4 msb
 	UBRR0L = BAUD_PRESCALE;
 	
-	DDRD |= (1 << PIN_SERVO);                               // dedicated PWM pin for timer 3 as output
-	PORTD |= (1 << PIN_SERVO);                              // this must be done to disable OC4B, the pin is shared
-	ICR3 = SERVO_WIDTH;                                     // the "TOP", makes the time period, OCR3A makes duty cycle
-	TCCR3A |= (1 << COM3B1) | (1 << WGM31);                 // non inverting, mode14
-	TCCR3B |= (1 << WGM33) | (1 << WGM32) | (1 << CS31);    // mode 14, prescale 8
+	DDRB = PINS_STEP;    // the stepper coil pins as output
+	PORTB = 0;           // motor begins turned off
 	
 	usart_puts("\r\n");
 	usart_puts("         initialization complete, program begins...\r\n");
@@ -86,22 +92,58 @@ int main(void)
 	while(1)
 	{
 		read_adc();
-		servo_counter = (SERVO_RANGE / ADC_MAX) * adc_raw + SERVO_START;
-		if (servo_counter > SERVO_STOP ||
-			servo_counter < SERVO_START )
+		stepper_pause_us = (((STEP_FASTEST-STEP_SLOWEST)/ADC_MAX) * adc_raw) + STEP_SLOWEST;
+		if (stepper_pause_us > STEP_SLOWEST || 
+			stepper_pause_us < STEP_FASTEST  )
 		{
-			servo_counter = SERVO_START;
-			_delay_ms(SERVO_RETURN);
+			stepper_pause_us = STEP_SLOWEST;
 		}
+		PORTB = STEP_1;
+		#ifdef TEST
+			_delay_us(TEST);
+		#else
+			make_delay_us();
+		#endif
+		PORTB = STEP_2;
+		#ifdef TEST
+			_delay_us(TEST);
+		#else
+			make_delay_us();
+		#endif
+		PORTB = STEP_3;
+		#ifdef TEST
+			_delay_us(TEST);
+		#else
+			make_delay_us();
+		#endif
+		PORTB = STEP_4;
+		#ifdef TEST
+			_delay_us(TEST);
+		#else
+			make_delay_us();
+		#endif
 		
-		OCR3B = servo_counter;
-		
-		sprintf(helper, "adc=  %9d  ,  servo:  %9d\r\n", 
-			adc_raw, servo_counter);
-		usart_puts(helper);
-		_delay_ms(SERVO_HANG);
+		#ifdef DEBUG_UART
+			sprintf(helper, "adc_raw=  %9d  ,  stepper_pause_us=  %9d\r\n", 
+				adc_raw, stepper_pause_us);
+			usart_puts(helper);
+		#endif
 	}
 	return EXIT_FAILURE;
+}
+
+
+////~~~~
+
+
+void make_delay_us()
+{
+	uint16_t counter = 0;
+	while (counter < stepper_pause_us)
+	{
+		_delay_us(1);
+		counter++;
+	}
 }
 
 
