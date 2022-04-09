@@ -74,7 +74,6 @@
 #include <string.h>
 #include <util/delay.h>
 #include <util/atomic.h>
-						
 
 uint16_t servo_counter;
 volatile char helper[HELP_BUF];
