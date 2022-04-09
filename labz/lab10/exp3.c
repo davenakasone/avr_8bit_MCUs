@@ -1,7 +1,8 @@
 /*
 	lab10, exp3
+	timer1, complementary toggle OC1A, OC1B
 	
-	a) timer2, T = 10 ms, f = 1/T = 100 Hz
+	a) timer1, T = 10 ms, f = 1/T = 100 Hz
 		f_pwm = f_cpu / (N * [top+1])  --> ICR1 a top
 		N = 8
 		ICR1 = (f_cpu/(N*f_pwm)) - 1 --> ICR1 = 20000
