@@ -1,0 +1,8 @@
+task 1, print to UART
+https://youtu.be/so3LgRhPMWA
+
+task2, filter and plot
+https://youtu.be/02JxrRWnF2k
+
+task3, calculate roll, pitch, yaw --> plot
+https://youtu.be/0dkAURsSJgw
